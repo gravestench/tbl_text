@@ -1,5 +1,5 @@
 package tbl_text
 
-import "github.com/gravestench/tbl_text/pkg"
+import . "github.com/gravestench/tbl_text/pkg"
 
-var _ pkg.TextTable
+var _ = TextTable{}
