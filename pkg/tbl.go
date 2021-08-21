@@ -4,7 +4,7 @@ import (
 	"log"
 	"strconv"
 
-	"github.com/gravestench/bitstream"
+	"github.com/OpenDiablo2/bitstream"
 )
 
 // TextTable is a string map
