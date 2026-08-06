@@ -65,6 +65,17 @@ The Diablo 2 TextTable Unmarshaller package offers the following features:
 - Access individual key-value pairs in the TextTable.
 - Provides a convenient `TextTable` data structure for working with translations.
 
+## Command-line tools
+
+```shell
+go install ./cmd/tbl-to-json
+tbl-to-json path/to/string.tbl > string.json
+```
+
+`tbl-to-json` validates and decodes the table. JSON output is indented for shell pipelines and inspection.
+
+The `tbl` command also provides `get`, `search`, `json`, and `diff` subcommands, for example `tbl search string.tbl sword` and `tbl diff string.tbl expansionstring.tbl`.
+
 <!-- CONTRIBUTING -->
 ## Contributing
 

@@ -1,8 +1,9 @@
 package pkg
 
 import (
-	"log"
+	"fmt"
 	"strconv"
+	"strings"
 
 	"github.com/gravestench/bitstream"
 )
@@ -20,11 +21,16 @@ type hashEntry struct {
 }
 
 const (
-	crcByteCount = 2
+	crcByteCount   = 2
+	headerBytes    = 21
+	hashEntryBytes = 17
 )
 
 // Unmarshal the text dictionary from the given data
 func Unmarshal(fileData []byte) (TextTable, error) {
+	if len(fileData) < headerBytes {
+		return nil, fmt.Errorf("TBL header is truncated: got %d bytes", len(fileData))
+	}
 	lookupTable := make(TextTable)
 
 	stream := bitstream.NewReader().FromBytes(fileData...)
@@ -46,17 +52,28 @@ func Unmarshal(fileData []byte) (TextTable, error) {
 	}
 
 	// Version (always 0)
-	if _, err = stream.Next(1).Bytes().AsByte(); err != nil {
-		log.Fatal("Error reading Version record")
+	version, err := stream.Next(1).Bytes().AsByte()
+	if err != nil {
+		return nil, fmt.Errorf("reading TBL version: %w", err)
+	}
+	if version != 0 {
+		return nil, fmt.Errorf("unsupported TBL version %d", version)
 	}
 
 	stream.Next(4).Bytes() // StringOffset
 	stream.Next(4).Bytes() // When the number of times you have missed a match with a hash key equals this value, you give up because it is not there.
 	stream.Next(4).Bytes() // FileSize
 
+	remaining := len(fileData) - headerBytes
+	if uint64(numberOfElements)*2+uint64(hashTableSize)*hashEntryBytes > uint64(remaining) {
+		return nil, fmt.Errorf("TBL index tables exceed payload")
+	}
 	elementIndex := make([]uint16, numberOfElements)
 	for i := 0; i < int(numberOfElements); i++ {
 		elementIndex[i], err = stream.Next(2).Bytes().AsUInt16()
+		if err != nil {
+			return nil, fmt.Errorf("reading element index %d: %w", i, err)
+		}
 	}
 
 	hashEntries := make([]hashEntry, hashTableSize)
@@ -81,6 +98,10 @@ func Unmarshal(fileData []byte) (TextTable, error) {
 		if !hashEntry.IsActive {
 			continue
 		}
+		if hashEntry.NameLength == 0 || uint64(hashEntry.NameString)+uint64(hashEntry.NameLength) > uint64(len(fileData)) ||
+			uint64(hashEntry.IndexString) >= uint64(len(fileData)) {
+			return nil, fmt.Errorf("hash entry %d points outside TBL payload", idx)
+		}
 
 		stream.SetPosition(int(hashEntry.NameString))
 		nameVal, err := stream.Next(int(hashEntry.NameLength - 1)).Bytes().AsBytes()
@@ -91,28 +112,28 @@ func Unmarshal(fileData []byte) (TextTable, error) {
 
 		stream.SetPosition(int(hashEntry.IndexString))
 
-		key := ""
+		var key strings.Builder
 
 		for {
 			b, err := stream.Next(1).Bytes().AsByte()
+			if err != nil {
+				return nil, err
+			}
 			if b == 0 {
 				break
 			}
 
-			if err != nil {
-				return nil, err
-			}
+			key.WriteByte(b)
+		}
+		keyString := key.String()
 
-			key += string(b)
+		if keyString == "x" || keyString == "X" {
+			keyString = "#" + strconv.Itoa(idx)
 		}
 
-		if key == "x" || key == "X" {
-			key = "#" + strconv.Itoa(idx)
-		}
-
-		_, exists := lookupTable[key]
+		_, exists := lookupTable[keyString]
 		if !exists {
-			lookupTable[key] = value
+			lookupTable[keyString] = value
 		}
 	}
 
