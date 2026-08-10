@@ -1,11 +1,12 @@
 package pkg
 
 import (
+	"bytes"
+	"encoding/binary"
 	"fmt"
+	"io"
 	"strconv"
 	"strings"
-
-	"github.com/gravestench/bitstream"
 )
 
 // TextTable is a string map
@@ -28,104 +29,78 @@ const (
 
 // Unmarshal the text dictionary from the given data
 func Unmarshal(fileData []byte) (TextTable, error) {
-	if len(fileData) < headerBytes {
-		return nil, fmt.Errorf("TBL header is truncated: got %d bytes", len(fileData))
+	return UnmarshalReaderAt(bytes.NewReader(fileData), int64(len(fileData)))
+}
+
+// UnmarshalReaderAt decodes a TBL without copying the complete file. TBL hash
+// entries contain absolute string offsets, so ReaderAt is the honest contract.
+func UnmarshalReaderAt(source io.ReaderAt, size int64) (TextTable, error) {
+	if source == nil {
+		return nil, fmt.Errorf("TBL reader is nil")
+	}
+	if size < headerBytes {
+		return nil, fmt.Errorf("TBL header is truncated: got %d bytes", size)
 	}
 	lookupTable := make(TextTable)
-
-	stream := bitstream.NewReader().FromBytes(fileData...)
-
-	// skip past the CRC
-	_, err := stream.Next(crcByteCount).Bytes().AsBytes()
-	if err != nil {
-		return nil, err
+	header := make([]byte, headerBytes)
+	if _, err := source.ReadAt(header, 0); err != nil {
+		return nil, fmt.Errorf("reading TBL header: %w", err)
 	}
-
-	numberOfElements, err := stream.Next(2).Bytes().AsUInt16()
-	if err != nil {
-		return nil, err
-	}
-
-	hashTableSize, err := stream.Next(4).Bytes().AsUInt32()
-	if err != nil {
-		return nil, err
-	}
+	numberOfElements := binary.LittleEndian.Uint16(header[crcByteCount:])
+	hashTableSize := binary.LittleEndian.Uint32(header[crcByteCount+2:])
 
 	// Version (always 0)
-	version, err := stream.Next(1).Bytes().AsByte()
-	if err != nil {
-		return nil, fmt.Errorf("reading TBL version: %w", err)
-	}
+	version := header[crcByteCount+2+4]
 	if version != 0 {
 		return nil, fmt.Errorf("unsupported TBL version %d", version)
 	}
 
-	stream.Next(4).Bytes() // StringOffset
-	stream.Next(4).Bytes() // When the number of times you have missed a match with a hash key equals this value, you give up because it is not there.
-	stream.Next(4).Bytes() // FileSize
-
-	remaining := len(fileData) - headerBytes
+	remaining := size - headerBytes
 	if uint64(numberOfElements)*2+uint64(hashTableSize)*hashEntryBytes > uint64(remaining) {
 		return nil, fmt.Errorf("TBL index tables exceed payload")
 	}
-	elementIndex := make([]uint16, numberOfElements)
-	for i := 0; i < int(numberOfElements); i++ {
-		elementIndex[i], err = stream.Next(2).Bytes().AsUInt16()
-		if err != nil {
-			return nil, fmt.Errorf("reading element index %d: %w", i, err)
-		}
+	offset := int64(headerBytes)
+	elementBytes := make([]byte, int(numberOfElements)*2)
+	if _, err := source.ReadAt(elementBytes, offset); err != nil {
+		return nil, fmt.Errorf("reading element index: %w", err)
 	}
+	offset += int64(len(elementBytes))
 
 	hashEntries := make([]hashEntry, hashTableSize)
+	entryBytes := make([]byte, hashEntryBytes)
 	for i := 0; i < int(hashTableSize); i++ {
-		td := hashEntry{}
-
-		td.IsActive, _ = stream.Next(1).Bytes().AsBool()
-		td.Index, _ = stream.Next(2).Bytes().AsUInt16()
-		td.HashValue, _ = stream.Next(4).Bytes().AsUInt32()
-		td.IndexString, _ = stream.Next(4).Bytes().AsUInt32()
-		td.NameString, _ = stream.Next(4).Bytes().AsUInt32()
-		td.NameLength, err = stream.Next(2).Bytes().AsUInt16()
-
-		if err != nil {
-			return nil, err
+		if _, err := source.ReadAt(entryBytes, offset+int64(i*hashEntryBytes)); err != nil {
+			return nil, fmt.Errorf("reading hash entry %d: %w", i, err)
 		}
-
-		hashEntries[i] = td
+		hashEntries[i] = hashEntry{
+			IsActive:    entryBytes[0] != 0,
+			Index:       binary.LittleEndian.Uint16(entryBytes[1:3]),
+			HashValue:   binary.LittleEndian.Uint32(entryBytes[3:7]),
+			IndexString: binary.LittleEndian.Uint32(entryBytes[7:11]),
+			NameString:  binary.LittleEndian.Uint32(entryBytes[11:15]),
+			NameLength:  binary.LittleEndian.Uint16(entryBytes[15:17]),
+		}
 	}
 
 	for idx, hashEntry := range hashEntries {
 		if !hashEntry.IsActive {
 			continue
 		}
-		if hashEntry.NameLength == 0 || uint64(hashEntry.NameString)+uint64(hashEntry.NameLength) > uint64(len(fileData)) ||
-			uint64(hashEntry.IndexString) >= uint64(len(fileData)) {
+		if hashEntry.NameLength == 0 || uint64(hashEntry.NameString)+uint64(hashEntry.NameLength) > uint64(size) ||
+			uint64(hashEntry.IndexString) >= uint64(size) {
 			return nil, fmt.Errorf("hash entry %d points outside TBL payload", idx)
 		}
 
-		stream.SetPosition(int(hashEntry.NameString))
-		nameVal, err := stream.Next(int(hashEntry.NameLength - 1)).Bytes().AsBytes()
-		if err != nil {
-			return nil, err
+		nameVal := make([]byte, int(hashEntry.NameLength)-1)
+		if _, err := source.ReadAt(nameVal, int64(hashEntry.NameString)); err != nil {
+			return nil, fmt.Errorf("reading value for hash entry %d: %w", idx, err)
 		}
 		value := string(nameVal)
-
-		stream.SetPosition(int(hashEntry.IndexString))
-
-		var key strings.Builder
-
-		for {
-			b, err := stream.Next(1).Bytes().AsByte()
-			if err != nil {
-				return nil, err
-			}
-			if b == 0 {
-				break
-			}
-
-			key.WriteByte(b)
+		key, err := readCStringAt(source, int64(hashEntry.IndexString), size)
+		if err != nil {
+			return nil, fmt.Errorf("reading key for hash entry %d: %w", idx, err)
 		}
-		keyString := key.String()
+		keyString := key
 
 		if keyString == "x" || keyString == "X" {
 			keyString = "#" + strconv.Itoa(idx)
@@ -138,4 +113,20 @@ func Unmarshal(fileData []byte) (TextTable, error) {
 	}
 
 	return lookupTable, nil
+}
+
+func readCStringAt(source io.ReaderAt, offset, size int64) (string, error) {
+	var result strings.Builder
+	var buffer [1]byte
+	for offset < size {
+		if _, err := source.ReadAt(buffer[:], offset); err != nil {
+			return "", err
+		}
+		offset++
+		if buffer[0] == 0 {
+			return result.String(), nil
+		}
+		result.WriteByte(buffer[0])
+	}
+	return "", io.ErrUnexpectedEOF
 }
