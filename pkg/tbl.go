@@ -49,9 +49,10 @@ func UnmarshalReaderAt(source io.ReaderAt, size int64) (TextTable, error) {
 	numberOfElements := binary.LittleEndian.Uint16(header[crcByteCount:])
 	hashTableSize := binary.LittleEndian.Uint32(header[crcByteCount+2:])
 
-	// Version (always 0)
+	// Diablo II string tables use format version 1. Font TBL files have a
+	// different header and are decoded by a separate codec.
 	version := header[crcByteCount+2+4]
-	if version != 0 {
+	if version != 1 {
 		return nil, fmt.Errorf("unsupported TBL version %d", version)
 	}
 
