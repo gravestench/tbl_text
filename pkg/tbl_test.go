@@ -9,7 +9,7 @@ import (
 
 func TestUnmarshalRejectsMalformedData(t *testing.T) {
 	badVersion := make([]byte, headerBytes)
-	badVersion[8] = 1
+	badVersion[8] = 2
 	for _, data := range [][]byte{{}, badVersion} {
 		if _, err := Unmarshal(data); err == nil {
 			t.Fatal("expected malformed TBL error")
@@ -21,6 +21,7 @@ func validTableBytes() []byte {
 	data := make([]byte, headerBytes+2+hashEntryBytes)
 	binary.LittleEndian.PutUint16(data[2:4], 1)
 	binary.LittleEndian.PutUint32(data[4:8], 1)
+	data[8] = 1
 	entry := data[headerBytes+2:]
 	entry[0] = 1
 	keyOffset := len(data)
